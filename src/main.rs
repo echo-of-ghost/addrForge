@@ -165,7 +165,7 @@ impl std::str::FromStr for AddrType {
     }
 }
 
-// ── Signing mode ──────────────────────────────────────────────────────────────
+// ── Address Mode ──────────────────────────────────────────────────────────────
 
 #[derive(Clone, PartialEq, Copy)]
 enum SigningMode { SingleSig, MuSig2 }
