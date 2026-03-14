@@ -165,23 +165,23 @@ impl std::str::FromStr for AddrType {
     }
 }
 
-// ── Address Mode ──────────────────────────────────────────────────────────────
+// ── Address mode ──────────────────────────────────────────────────────────────
 
 #[derive(Clone, PartialEq, Copy)]
-enum SigningMode { SingleSig, MuSig2 }
+enum AddrMode { SingleSig, MuSig2 }
 
-impl SigningMode {
+impl AddrMode {
     fn label(&self) -> &'static str {
         match self {
-            SigningMode::SingleSig => "SINGLESIG  -- ONE KEY, ONE SIGNER",
-            SigningMode::MuSig2    => "MUSIG2     -- AGGREGATE TWO KEYS",
+            AddrMode::SingleSig => "SINGLESIG  -- ONE KEY, ONE OWNER",
+            AddrMode::MuSig2    => "MUSIG2     -- AGGREGATE TWO KEYS",
         }
     }
     fn description(&self) -> &'static str {
         match self {
-            SigningMode::SingleSig =>
+            AddrMode::SingleSig =>
                 "STANDARD SINGLE-KEY ADDRESS.\n  YOU HOLD THE PRIVATE KEY AND SIGN ALONE.\n  COMPATIBLE WITH ALL BITCOIN ADDRESS TYPES.",
-            SigningMode::MuSig2 =>
+            AddrMode::MuSig2 =>
                 "TWO-OF-TWO MULTISIG VIA KEY AGGREGATION (BIP-327).\n  ENTER TWO PUBKEYS TO DERIVE THE AGGREGATE\n  TAPROOT ADDRESS. BOTH PARTIES MUST CO-SIGN.\n  INDISTINGUISHABLE FROM SINGLESIG ON-CHAIN.",
         }
     }
@@ -277,7 +277,7 @@ fn musig2_aggregate(pk1_hex: &str, pk2_hex: &str) -> Result<Secp256k1PubKey> {
 // ── Screens / Fields ──────────────────────────────────────────────────────────
 
 #[derive(PartialEq, Clone, Copy)]
-enum Screen { SigningPicker, TypePicker, MuSig2Setup, MuSig2Result, Setup, Running, Results, Inspector }
+enum Screen { ModePicker, TypePicker, MuSig2Setup, MuSig2Result, Setup, Running, Results, Inspector }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Field { Mode, Pattern, Threads, Count, Merkle }
@@ -316,8 +316,8 @@ struct App {
     screen:          Screen,
     prev_screen:     Screen,
 
-    // signing picker
-    signing_sel:     usize,
+    // mode picker
+    mode_sel:     usize,
 
     // type picker
     addr_type:       AddrType,
@@ -370,17 +370,14 @@ struct App {
 
     // session
     session:         Session,
-
-    // redraw control — only draw when state has changed
-    dirty:           bool,
 }
 
 impl App {
     fn new() -> Self {
         Self {
-            screen:          Screen::SigningPicker,
-            prev_screen:     Screen::SigningPicker,
-            signing_sel:     0,
+            screen:          Screen::ModePicker,
+            prev_screen:     Screen::ModePicker,
+            mode_sel:     0,
             addr_type:       AddrType::Taproot,
             picker_sel:      0,
             field:           Field::Mode,
@@ -414,7 +411,6 @@ impl App {
             inspector_result: None,
             output_dir:      ".".into(),
             session:         Session::new(),
-            dirty:           true,
         }
     }
 
@@ -611,13 +607,10 @@ impl App {
         if let Some(rx) = &self.rx {
             while let Ok(m) = rx.try_recv() {
                 self.results.lock().unwrap_or_else(|e| e.into_inner()).push(m);
-                self.dirty = true;
             }
         }
         match self.screen {
             Screen::Running => {
-                // Live counters need periodic redraws
-                self.dirty = true;
                 if self.done.load(Ordering::Relaxed) {
                     if self.finish.is_none() {
                         self.finish = Some(Instant::now());
@@ -1202,7 +1195,7 @@ fn draw(out: &mut impl Write, app: &App) -> Result<()> {
     }
 
     let nav = match app.screen {
-        Screen::SigningPicker | Screen::TypePicker |
+        Screen::ModePicker | Screen::TypePicker |
         Screen::Setup | Screen::MuSig2Setup | Screen::Results => "F2 INSPECT",
         _ => "",
     };
@@ -1219,7 +1212,7 @@ fn draw(out: &mut impl Write, app: &App) -> Result<()> {
     cl!(out, 1);
 
     match app.screen {
-        Screen::SigningPicker => draw_signing_picker(out, app)?,
+        Screen::ModePicker => draw_mode_picker(out, app)?,
         Screen::TypePicker    => draw_type_picker(out, app)?,
         Screen::MuSig2Setup   => draw_musig2_setup(out, app)?,
         Screen::MuSig2Result  => draw_musig2_result(out, app)?,
@@ -1233,15 +1226,15 @@ fn draw(out: &mut impl Write, app: &App) -> Result<()> {
     Ok(())
 }
 
-// ── Signing picker ────────────────────────────────────────────────────────────
+// ── Mode picker ────────────────────────────────────────────────────────────
 
-fn draw_signing_picker(out: &mut impl Write, app: &App) -> Result<()> {
+fn draw_mode_picker(out: &mut impl Write, app: &App) -> Result<()> {
     clear_body!(out);
-    cl!(out, 2); bright!(out); w!(out, "  SIGNING MODE");
+    cl!(out, 2); bright!(out); w!(out, "  ADDRESS MODE");
     cl!(out, 3);
-    for (i, mode) in [SigningMode::SingleSig, SigningMode::MuSig2].iter().enumerate() {
+    for (i, mode) in [AddrMode::SingleSig, AddrMode::MuSig2].iter().enumerate() {
         cl!(out, 4 + i as u16);
-        if i == app.signing_sel {
+        if i == app.mode_sel {
             green!(out); w!(out, "  ");
             inv_on!(out); w!(out, " {} ", mode.label()); inv_off!(out);
         } else {
@@ -1251,9 +1244,9 @@ fn draw_signing_picker(out: &mut impl Write, app: &App) -> Result<()> {
     cl!(out, 6);
     cl!(out, 7); dim!(out); w!(out, "  {}", SEP);
     cl!(out, 8);
-    let sel = if app.signing_sel == 0 { SigningMode::SingleSig } else { SigningMode::MuSig2 };
+    let sel = if app.mode_sel == 0 { AddrMode::SingleSig } else { AddrMode::MuSig2 };
     warn!(out);
-    match sel { SigningMode::SingleSig => { w!(out, "  SINGLESIG"); } SigningMode::MuSig2 => { w!(out, "  MUSIG2"); } }
+    match sel { AddrMode::SingleSig => { w!(out, "  SINGLESIG"); } AddrMode::MuSig2 => { w!(out, "  MUSIG2"); } }
     cl!(out, 9);
     let desc_lines: Vec<&str> = sel.description().split('\n').collect();
     for (i, line) in desc_lines.iter().enumerate() {
@@ -1829,10 +1822,7 @@ fn main() -> Result<()> {
     app.output_dir = cli.output_dir.clone();
 
     loop {
-        if app.dirty {
-            draw(&mut stdout, &app)?;
-            app.dirty = false;
-        }
+        draw(&mut stdout, &app)?;
 
         if event::poll(Duration::from_millis(TICK_MS))? {
             match event::read()? {
@@ -1844,19 +1834,16 @@ fn main() -> Result<()> {
                         SetForegroundColor(GREEN),
                         cursor::Hide,
                     )?;
-                    app.dirty = true;
                     continue;
                 }
                 Event::Key(k) => {
-                app.dirty = true;
-
                 if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
                     break;
                 }
 
                 if k.code == KeyCode::F(2)
                     && matches!(app.screen, Screen::Setup | Screen::Results |
-                                Screen::TypePicker | Screen::SigningPicker | Screen::MuSig2Setup)
+                                Screen::TypePicker | Screen::ModePicker | Screen::MuSig2Setup)
                 {
                     app.prev_screen = app.screen;
                     app.screen = Screen::Inspector;
@@ -1865,9 +1852,9 @@ fn main() -> Result<()> {
 
                 if k.code == KeyCode::Esc {
                     match app.screen {
-                        Screen::SigningPicker => break,
-                        Screen::TypePicker    => { app.screen = Screen::SigningPicker; }
-                        Screen::MuSig2Setup   => { app.screen = Screen::SigningPicker; app.error = None; }
+                        Screen::ModePicker => break,
+                        Screen::TypePicker    => { app.screen = Screen::ModePicker; }
+                        Screen::MuSig2Setup   => { app.screen = Screen::ModePicker; app.error = None; }
                         Screen::MuSig2Result  => {
                             app.screen = Screen::MuSig2Setup;
                             app.musig2_agg_key = None;
@@ -1886,7 +1873,7 @@ fn main() -> Result<()> {
                         Screen::Results => {
                             // ESC goes back to Setup — keep addr type, network, mode, pattern
                             // so the user can tweak and search again immediately.
-                            // N) NEW resets all the way to SigningPicker.
+                            // N) NEW resets all the way to ModePicker.
                             app.screen = Screen::Setup;
                             app.error  = None;
                             app.saved  = None;
@@ -1898,7 +1885,7 @@ fn main() -> Result<()> {
                 }
 
                 match app.screen {
-                    Screen::SigningPicker => on_signing_picker_key(&mut app, k.code),
+                    Screen::ModePicker => on_mode_picker_key(&mut app, k.code),
                     Screen::TypePicker    => on_picker_key(&mut app, k.code),
                     Screen::MuSig2Setup   => on_musig2_setup_key(&mut app, k.code),
                     Screen::MuSig2Result  => on_musig2_result_key(&mut app, k.code),
@@ -1929,12 +1916,12 @@ fn main() -> Result<()> {
 
 // ── Key handlers ─────────────────────────────────────────────────────────────
 
-fn on_signing_picker_key(app: &mut App, key: KeyCode) {
+fn on_mode_picker_key(app: &mut App, key: KeyCode) {
     match key {
-        KeyCode::Up   | KeyCode::Char('k') => { app.signing_sel = app.signing_sel.saturating_sub(1); }
-        KeyCode::Down | KeyCode::Char('j') => { app.signing_sel = (app.signing_sel + 1).min(1); }
+        KeyCode::Up   | KeyCode::Char('k') => { app.mode_sel = app.mode_sel.saturating_sub(1); }
+        KeyCode::Down | KeyCode::Char('j') => { app.mode_sel = (app.mode_sel + 1).min(1); }
         KeyCode::Enter => {
-            if app.signing_sel == 0 {
+            if app.mode_sel == 0 {
                 app.screen       = Screen::TypePicker;
             } else {
                 app.screen       = Screen::MuSig2Setup;
