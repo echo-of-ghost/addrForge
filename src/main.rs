@@ -370,6 +370,9 @@ struct App {
 
     // session
     session:         Session,
+
+    // redraw control — only draw when state has changed
+    dirty:           bool,
 }
 
 impl App {
@@ -411,6 +414,7 @@ impl App {
             inspector_result: None,
             output_dir:      ".".into(),
             session:         Session::new(),
+            dirty:           true,
         }
     }
 
@@ -607,10 +611,13 @@ impl App {
         if let Some(rx) = &self.rx {
             while let Ok(m) = rx.try_recv() {
                 self.results.lock().unwrap_or_else(|e| e.into_inner()).push(m);
+                self.dirty = true;
             }
         }
         match self.screen {
             Screen::Running => {
+                // Live counters need periodic redraws
+                self.dirty = true;
                 if self.done.load(Ordering::Relaxed) {
                     if self.finish.is_none() {
                         self.finish = Some(Instant::now());
@@ -1822,7 +1829,10 @@ fn main() -> Result<()> {
     app.output_dir = cli.output_dir.clone();
 
     loop {
-        draw(&mut stdout, &app)?;
+        if app.dirty {
+            draw(&mut stdout, &app)?;
+            app.dirty = false;
+        }
 
         if event::poll(Duration::from_millis(TICK_MS))? {
             match event::read()? {
@@ -1834,9 +1844,12 @@ fn main() -> Result<()> {
                         SetForegroundColor(GREEN),
                         cursor::Hide,
                     )?;
+                    app.dirty = true;
                     continue;
                 }
                 Event::Key(k) => {
+                app.dirty = true;
+
                 if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
                     break;
                 }
