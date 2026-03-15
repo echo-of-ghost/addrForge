@@ -6,6 +6,11 @@ Bitcoin vanity address generator. Find addresses that start or end with a patter
 bc1pcat     bc1qfat     1Dad     3Shop
 ```
 
+![Address Mode](assets/screen1.png)
+![Type Picker](assets/screen2.png)
+![Setup](assets/screen3.png)
+![Inspector](assets/screen4.png)
+
 ---
 
 ## Build
@@ -29,9 +34,9 @@ Launch with no arguments to open the interactive terminal interface.
 **Flow:**
 
 ```
-Signing Picker → Type Picker → Setup → Running → Results
-                     ↓
-                MuSig2 Setup → MuSig2 Result
+Address Mode → Type Picker → Setup → Running → Results
+                   ↓
+              MuSig2 Setup → MuSig2 Result
 ```
 
 | Key | Action |
