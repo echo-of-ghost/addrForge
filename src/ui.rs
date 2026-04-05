@@ -18,11 +18,11 @@ use crate::{
 
 // ── Palette ───────────────────────────────────────────────────────────────────
 
-const GREEN:  Color = Color::Rgb(36,  255, 82);
-const DIM:    Color = Color::Rgb(18,  100, 32);
-const BRIGHT: Color = Color::Rgb(180, 255, 200);
-const BLACK:  Color = Color::Rgb(0,   0,   0);
-const WARN:   Color = Color::Rgb(255, 180, 40);
+const GREEN:  Color = Color::Rgb(85,  158, 101); // --grn   #559e65
+const DIM:    Color = Color::Rgb(58,  138, 74);  // --grn2  #3a8a4a
+const BRIGHT: Color = Color::Rgb(232, 232, 232); // --t1    #e8e8e8
+const BLACK:  Color = Color::Rgb(14,  14,  14);  // --ink   #0e0e0e
+const WARN:   Color = Color::Rgb(240, 112, 32);  // --orange #f07020
 
 const SEP: &str     = "------------------------------------------------------------";
 const VERSION: &str = concat!("V", env!("CARGO_PKG_VERSION"));
