@@ -24,6 +24,8 @@ dirs              = "=5.0.1"
 unicode-segmentation = "=1.12.0"
 
 [profile.release]
-opt-level     = 3
-lto           = true
-codegen-units = 1
+opt-level       = 3
+lto             = true
+codegen-units   = 1
+# Catch integer wraparound bugs; negligible cost next to the EC math
+overflow-checks = true

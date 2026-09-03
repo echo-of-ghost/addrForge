@@ -39,14 +39,17 @@ pub struct InspectorResult {
 
 pub fn generate_address(secret: &SecretKey, addr_type: crate::types::AddrType, network: Network) -> String {
     use crate::types::AddrType;
-    let (xonly, _) = secret.x_only_public_key(SECP256K1);
-    let cpk = CompressedPublicKey(secret.public_key(SECP256K1));
+    // One scalar multiplication per attempt; the x-only key is a cheap
+    // projection of the full public key, not a second derivation.
+    let pk = secret.public_key(SECP256K1);
     match addr_type {
-        AddrType::Legacy       => Address::p2pkh(&cpk, network).to_string(),
-        AddrType::NestedSegWit => Address::p2shwpkh(&cpk, network).to_string(),
-        AddrType::NativeSegWit => Address::p2wpkh(&cpk, network).to_string(),
-        AddrType::Taproot      =>
-            Address::p2tr(SECP256K1, UntweakedPublicKey::from(xonly), None, network).to_string(),
+        AddrType::Legacy       => Address::p2pkh(&CompressedPublicKey(pk), network).to_string(),
+        AddrType::NestedSegWit => Address::p2shwpkh(&CompressedPublicKey(pk), network).to_string(),
+        AddrType::NativeSegWit => Address::p2wpkh(&CompressedPublicKey(pk), network).to_string(),
+        AddrType::Taproot      => {
+            let (xonly, _) = pk.x_only_public_key();
+            Address::p2tr(SECP256K1, UntweakedPublicKey::from(xonly), None, network).to_string()
+        }
     }
 }
 
@@ -55,7 +58,7 @@ pub fn generate_address_merkle(
     merkle: Option<bitcoin::taproot::TapNodeHash>,
     network: Network,
 ) -> String {
-    let (xonly, _) = secret.x_only_public_key(SECP256K1);
+    let (xonly, _) = secret.public_key(SECP256K1).x_only_public_key();
     Address::p2tr(SECP256K1, UntweakedPublicKey::from(xonly), merkle, network).to_string()
 }
 
@@ -67,9 +70,9 @@ pub fn build_found_addr(
     network: Network,
 ) -> FoundAddr {
     use crate::types::AddrType;
-    let (xonly, _) = secret.x_only_public_key(SECP256K1);
-    let cpk = CompressedPublicKey(secret.public_key(SECP256K1));
-    let compressed = cpk.to_string();
+    let pk = secret.public_key(SECP256K1);
+    let (xonly, _) = pk.x_only_public_key();
+    let compressed = CompressedPublicKey(pk).to_string();
     let pubkey = match addr_type {
         AddrType::Taproot => xonly.to_string(),
         _                 => compressed.clone(),
