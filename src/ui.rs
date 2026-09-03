@@ -11,7 +11,7 @@ use ratatui::{
 use crate::{
     address::InspectorResult,
     difficulty::{base58_prefix_is_rare, difficulty_for_prefix, difficulty_for_suffix},
-    fmt_dur, fmt_num, fmt_rate, truncate,
+    fmt_attempts, fmt_dur, fmt_num, fmt_rate, truncate,
     types::{AddrMode, AddrType, Mode, network_all, network_label},
     App, Field, Screen,
 };
@@ -415,7 +415,7 @@ fn draw_setup(f: &mut Frame, body: Rect, app: &App) {
             let diff = difficulty_for_prefix(&app.pattern_input, app.addr_type, app.network);
             let mut diff_spans = vec![
                 s("  DIFFICULTY  : ", sd()),
-                s(format!("~{} ATTEMPTS", fmt_num(diff as u64)), sg()),
+                s(format!("~{} ATTEMPTS", fmt_attempts(diff)), sg()),
             ];
             if matches!(app.addr_type, AddrType::Legacy | AddrType::NestedSegWit) {
                 diff_spans.push(s("  (CASE-SENSITIVE)", sd()));
@@ -433,7 +433,7 @@ fn draw_setup(f: &mut Frame, body: Rect, app: &App) {
             let diff = difficulty_for_suffix(app.pattern_input.len(), app.addr_type);
             lines.push(Line::from(vec![
                 s("  DIFFICULTY  : ", sd()),
-                s(format!("~{} ATTEMPTS", fmt_num(diff as u64)), sg()),
+                s(format!("~{} ATTEMPTS", fmt_attempts(diff)), sg()),
             ]));
         }
         Mode::Regex => {

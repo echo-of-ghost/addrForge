@@ -575,6 +575,17 @@ pub fn fmt_num(n: u64) -> String {
     out.chars().rev().collect()
 }
 
+/// Format an expected-attempts estimate. Casting f64 to u64 saturates, so an
+/// unreachable pattern or a merely huge one both used to render as
+/// 18,446,744,073,709,551,615 — a number that looks like an overflow bug and
+/// tells the user nothing.
+pub fn fmt_attempts(d: f64) -> String {
+    if d.is_nan()      { return "?".into(); }
+    if !d.is_finite()  { return "UNREACHABLE".into(); }
+    if d < 1e15        { return fmt_num(d as u64); }
+    format!("{:.3E}", d)
+}
+
 pub fn fmt_rate(r: f64) -> String {
     if r >= 1_000_000.0 { format!("{:.2}M/SEC", r / 1_000_000.0) }
     else if r >= 1_000.0 { format!("{:.0}K/SEC", r / 1_000.0) }
