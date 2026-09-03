@@ -187,7 +187,7 @@ Saved results are written to `addrforge-<timestamp>.txt` in the output directory
 Example singlesig result file:
 
 ```
-ADDRFORGE V0.9.0 -- RESULTS
+ADDRFORGE V1.0.0 -- RESULTS
 TYPE    : TAPROOT (P2TR)
 NETWORK : MAINNET
 MODE    : PREFIX
