@@ -1,11 +1,23 @@
 use bitcoin::Network;
 use crate::types::{AddrType, BASE58_CHARSET};
 
+// Base58check model: the 25-byte payload (version ++ hash160 ++ checksum) is
+// encoded as one '1' per leading zero byte, followed by the base58 digits of
+// the remaining bytes read as one big integer. Only version 0x00 produces
+// leading zero bytes (the version byte itself, plus any leading zero bytes of
+// the hash160 — each extra zero byte is a 1-in-256 event adding another '1').
+// Non-zero versions encode the full 25-byte integer directly, so the first
+// character is determined by the version's numeric range ('m'/'n' for 0x6f,
+// '3' for 0x05, '2' for 0xc4) and never contains padding '1's.
+//
+// Computations use f64: interval widths dwarf rounding error for any pattern
+// short enough to ever be found, and difficulty output is an estimate.
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Expected attempts to find a prefix match.
 /// For bech32: uniform 32^extra_chars.
-/// For base58: exact fraction accounting for the version-byte constraint.
+/// For base58: exact fraction under the model above.
 pub fn difficulty_for_prefix(prefix: &str, addr_type: AddrType, network: Network) -> f64 {
     match addr_type {
         AddrType::Taproot | AddrType::NativeSegWit => {
@@ -27,128 +39,84 @@ pub fn difficulty_for_suffix(suffix_len: usize, addr_type: AddrType) -> f64 {
 
 /// Check whether a base58check prefix is reachable for a given version byte.
 pub fn is_base58_prefix_reachable(prefix: &str, version: u8) -> bool {
-    !reachable_lengths(prefix, version).is_empty()
+    base58_prefix_difficulty(prefix, version).is_finite()
 }
 
-/// Return which address lengths a base58check prefix can appear in.
-pub fn reachable_lengths(prefix: &str, version: u8) -> Vec<usize> {
-    let possible_lengths: &[usize] = if version == 0x00 || version == 0x6f { &[33, 34] } else { &[34] };
-    let mut out = Vec::new();
-
-    for &addr_len in possible_lengths {
-        if prefix.len() > addr_len { continue; }
-
-        if version == 0x00 || version == 0x6f {
-            let digits = addr_len - 1;
-            let first_char = if version == 0x00 { '1' } else { 'm' };
-            if !prefix.starts_with(first_char) && prefix.len() >= 1 { continue; }
-            let prefix_after_first = if prefix.len() >= 1 { &prefix[1..] } else { prefix };
-
-            if prefix_after_first.is_empty() {
-                out.push(addr_len);
-                continue;
-            }
-
-            let (p_min, p_max) = base58_prefix_to_range(prefix_after_first, digits);
-            let digit_min = base58_pow(digits - 1);
-            let digit_max = base58_pow(digits) - 1.0;
-            let data_max: f64 = 2.0_f64.powi(192) - 1.0;
-            let range_min = digit_min;
-            let range_max = if digit_max > data_max { data_max } else { digit_max };
-
-            if p_max >= range_min && p_min <= range_max {
-                out.push(addr_len);
-            }
-        } else {
-            let range_min = (version as f64) * 256.0_f64.powi(24);
-            let range_max = ((version as f64) + 1.0) * 256.0_f64.powi(24) - 1.0;
-            let (p_min, p_max) = base58_prefix_to_range(prefix, addr_len);
-            if p_max >= range_min && p_min <= range_max {
-                out.push(addr_len);
-            }
-        }
-    }
-    out
-}
-
-/// Returns true if a Legacy/Testnet prefix is only reachable in the rare 33-char format.
+/// Returns true if a prefix only matches a rare address form (e.g. extra
+/// leading '1's requiring leading zero hash bytes), so searches will be much
+/// slower than the per-character estimate suggests.
 pub fn base58_prefix_is_rare(prefix: &str, version: u8) -> bool {
-    let lens = reachable_lengths(prefix, version);
-    !lens.is_empty() && !lens.contains(&34)
+    let d = base58_prefix_difficulty(prefix, version);
+    let naive = 58.0_f64.powi(prefix.len().saturating_sub(1) as i32);
+    d.is_finite() && d > naive * 3.0
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-/// Compute expected attempts to find a base58check address starting with `prefix`.
+fn pow256(n: i32) -> f64 { 256.0_f64.powi(n) }
+fn pow58(n: i32) -> f64 { 58.0_f64.powi(n) }
+
+/// Numeric value of a base58 digit string, or None on an invalid character.
+fn base58_value(s: &str) -> Option<f64> {
+    let mut v = 0.0_f64;
+    for ch in s.chars() {
+        v = v * 58.0 + BASE58_CHARSET.find(ch)? as f64;
+    }
+    Some(v)
+}
+
+/// How many integers in [lo, hi) have base58 digits starting with `digits`.
+/// Sums over every possible total digit count.
+fn matched_in_range(digits: &str, lo: f64, hi: f64) -> f64 {
+    let Some(val) = base58_value(digits) else { return 0.0 };
+    let len = digits.len() as i32;
+    let mut matched = 0.0_f64;
+    for d in len..=40 {
+        let d_lo = if d == 1 { 0.0 } else { pow58(d - 1) };
+        let d_hi = pow58(d);
+        if d_hi <= lo { continue; }
+        if d_lo >= hi { break; }
+        let r_lo = val * pow58(d - len);
+        let r_hi = (val + 1.0) * pow58(d - len);
+        let w = r_hi.min(d_hi).min(hi) - r_lo.max(d_lo).max(lo);
+        if w > 0.0 { matched += w; }
+    }
+    matched
+}
+
+/// Expected attempts for a base58check prefix under version byte `version`.
 fn base58_prefix_difficulty(prefix: &str, version: u8) -> f64 {
-    if version == 0x00 || version == 0x6f {
-        let first_char = if version == 0x00 { '1' } else { 'm' };
-        if prefix.len() < 1 || !prefix.starts_with(first_char) { return 1.0; }
-        let suffix = &prefix[1..];
-        if suffix.is_empty() { return 1.0; }
-
-        let mut matching: f64 = 0.0;
-        for n_digits in [32_usize, 33] {
-            let digit_lo: f64 = if n_digits <= 1 { 0.0 } else { 58.0_f64.powi((n_digits - 1) as i32) };
-            let digit_hi: f64 = 58.0_f64.powi(n_digits as i32) - 1.0;
-            let data_max: f64 = 256.0_f64.powi(24) - 1.0;
-            let digit_hi = if digit_hi > data_max { data_max } else { digit_hi };
-            if digit_lo > digit_hi { continue; }
-            if suffix.len() > n_digits { continue; }
-            let remaining = n_digits - suffix.len();
-            let (p_lo, p_hi) = base58_prefix_numeric_range(suffix, remaining);
-            let lo = if p_lo > digit_lo { p_lo } else { digit_lo };
-            let hi = if p_hi < digit_hi { p_hi } else { digit_hi };
-            if lo <= hi { matching += hi - lo + 1.0; }
+    if prefix.is_empty() { return 1.0; }
+    if base58_value(prefix).is_none() { return f64::INFINITY; }
+    if version == 0x00 {
+        // Leading '1's: one from the version byte, each further '1' demands a
+        // leading zero byte of hash160 (1/256 each).
+        if !prefix.starts_with('1') { return f64::INFINITY; }
+        let ones = prefix.chars().take_while(|c| *c == '1').count();
+        let k = (ones - 1) as i32; // required leading zero bytes of hash160
+        if k > 20 { return f64::INFINITY; }
+        let rest = &prefix[ones..];
+        if rest.is_empty() {
+            // Any address with at least k leading zero hash bytes matches.
+            return pow256(k);
         }
-        if matching <= 0.0 { return f64::INFINITY; }
-        256.0_f64.powi(24) / matching
+        // Exactly k zero bytes, then the digits of the remaining integer M
+        // (top byte non-zero) must start with `rest`.
+        let bytes = 24 - k;
+        let m_lo = pow256(bytes - 1);
+        let m_hi = pow256(bytes);
+        let matched = matched_in_range(rest, m_lo, m_hi);
+        if matched <= 0.0 { return f64::INFINITY; }
+        // P = P(k zero bytes) * P(M in matched set), M uniform over [0, 256^bytes)
+        pow256(k) * pow256(bytes) / matched
     } else {
-        let addr_lo: f64 = (version as f64) * 256.0_f64.powi(24);
-        let addr_hi: f64 = ((version as f64) + 1.0) * 256.0_f64.powi(24) - 1.0;
-        let n_digits: usize = 34;
-        if prefix.len() > n_digits { return f64::INFINITY; }
-        let remaining = n_digits - prefix.len();
-        let (p_lo, p_hi) = base58_prefix_numeric_range(prefix, remaining);
-        let lo = if p_lo > addr_lo { p_lo } else { addr_lo };
-        let hi = if p_hi < addr_hi { p_hi } else { addr_hi };
-        if lo > hi { return f64::INFINITY; }
-        let matching = hi - lo + 1.0;
-        let total_for_version = addr_hi - addr_lo + 1.0;
-        total_for_version / matching
+        // Full 25-byte integer N in [version * 256^24, (version+1) * 256^24).
+        let lo = version as f64 * pow256(24);
+        let hi = (version as f64 + 1.0) * pow256(24);
+        let matched = matched_in_range(prefix, lo, hi);
+        if matched <= 0.0 { return f64::INFINITY; }
+        (hi - lo) / matched
     }
-}
-
-fn base58_prefix_to_range(prefix: &str, total_digits: usize) -> (f64, f64) {
-    let remaining = total_digits - prefix.len();
-    let mut min_val: f64 = 0.0;
-    let mut max_val: f64 = 0.0;
-    for ch in prefix.chars() {
-        let idx = BASE58_CHARSET.find(ch).unwrap_or(0) as f64;
-        min_val = min_val * 58.0 + idx;
-        max_val = max_val * 58.0 + idx;
-    }
-    min_val *= base58_pow(remaining);
-    max_val = max_val * base58_pow(remaining) + (base58_pow(remaining) - 1.0);
-    (min_val, max_val)
-}
-
-fn base58_prefix_numeric_range(prefix: &str, remaining: usize) -> (f64, f64) {
-    let mut lo: f64 = 0.0;
-    let mut hi: f64 = 0.0;
-    for ch in prefix.chars() {
-        let idx = BASE58_CHARSET.find(ch).unwrap_or(0) as f64;
-        lo = lo * 58.0 + idx;
-        hi = hi * 58.0 + idx;
-    }
-    let pow = 58.0_f64.powi(remaining as i32);
-    lo *= pow;
-    hi = hi * pow + (pow - 1.0);
-    (lo, hi)
-}
-
-pub fn base58_pow(n: usize) -> f64 {
-    58.0_f64.powi(n as i32)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -161,22 +129,75 @@ mod tests {
     fn bech32_difficulty_scales_geometrically() {
         let d4 = difficulty_for_prefix("bc1pface", AddrType::Taproot, Network::Bitcoin);
         let d5 = difficulty_for_prefix("bc1pfaced", AddrType::Taproot, Network::Bitcoin);
-        // Each extra char multiplies difficulty by 32
         let ratio = d5 / d4;
         assert!((ratio - 32.0).abs() < 0.001, "ratio was {ratio}");
     }
 
     #[test]
     fn legacy_prefix_1_has_difficulty_1() {
-        // "1" matches every Legacy address
         let d = difficulty_for_prefix("1", AddrType::Legacy, Network::Bitcoin);
         assert_eq!(d, 1.0);
     }
 
     #[test]
+    fn repeated_ones_prefixes_are_reachable() {
+        // Addresses like 11..., 111... exist (leading zero hash bytes);
+        // each extra '1' costs a factor of 256.
+        assert!(is_base58_prefix_reachable("11", 0x00));
+        assert!(is_base58_prefix_reachable("111", 0x00));
+        assert!(is_base58_prefix_reachable("1111", 0x00));
+        assert_eq!(base58_prefix_difficulty("11", 0x00), 256.0);
+        assert_eq!(base58_prefix_difficulty("111", 0x00), 65536.0);
+        // '1' + zero byte + digits is also reachable
+        assert!(is_base58_prefix_reachable("11a", 0x00));
+    }
+
+    #[test]
+    fn repeated_ones_flagged_rare() {
+        assert!(base58_prefix_is_rare("11", 0x00));
+        assert!(!base58_prefix_is_rare("1A", 0x00));
+    }
+
+    #[test]
+    fn every_second_char_reachable_for_mainnet_legacy() {
+        for ch in BASE58_CHARSET.chars() {
+            let p = format!("1{ch}");
+            assert!(is_base58_prefix_reachable(&p, 0x00), "1{ch} should be reachable");
+        }
+    }
+
+    #[test]
     fn nested_segwit_prefix_reachable() {
-        // All 3... addresses are reachable for P2SH on mainnet
         assert!(is_base58_prefix_reachable("3A", 0x05));
+        // Mainnet P2SH always starts with '3'
+        assert!(!is_base58_prefix_reachable("2A", 0x05));
+    }
+
+    #[test]
+    fn testnet_legacy_m_and_n_both_reachable() {
+        assert!(is_base58_prefix_reachable("m", 0x6f));
+        assert!(is_base58_prefix_reachable("n", 0x6f));
+        assert!(is_base58_prefix_reachable("n4", 0x6f));
+        assert!(!is_base58_prefix_reachable("p", 0x6f));
+        // 'm' covers most testnet legacy addresses; difficulty near 1
+        let dm = base58_prefix_difficulty("m", 0x6f);
+        assert!(dm > 1.0 && dm < 1.5, "difficulty('m') was {dm}");
+        let dn = base58_prefix_difficulty("n", 0x6f);
+        assert!(dn > 2.0, "difficulty('n') was {dn}");
+    }
+
+    #[test]
+    fn testnet_nested_prefix_reachable() {
+        // Testnet P2SH (0xc4) addresses are 35 chars starting with '2'
+        assert!(is_base58_prefix_reachable("2N", 0xc4));
+        assert!(is_base58_prefix_reachable("2M", 0xc4));
+        assert!(!is_base58_prefix_reachable("3N", 0xc4));
+    }
+
+    #[test]
+    fn invalid_char_unreachable() {
+        assert!(!is_base58_prefix_reachable("1O", 0x00));
+        assert!(!is_base58_prefix_reachable("1l", 0x00));
     }
 
     #[test]
@@ -184,18 +205,5 @@ mod tests {
         let d1 = difficulty_for_suffix(1, AddrType::Taproot);
         let d2 = difficulty_for_suffix(2, AddrType::Taproot);
         assert!((d2 / d1 - 32.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn testnet_legacy_difficulty() {
-        // Testnet legacy addresses start with 'm' (version 0x6f)
-        let d = difficulty_for_prefix("m", AddrType::Legacy, Network::Testnet);
-        assert_eq!(d, 1.0);
-    }
-
-    #[test]
-    fn base58_prefix_is_rare_detects_33char_only() {
-        // '1' prefix is NOT rare for mainnet (version 0x00) — it covers both 33 and 34 char addresses
-        assert!(!base58_prefix_is_rare("1", 0x00));
     }
 }

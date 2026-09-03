@@ -5,6 +5,7 @@ use bitcoin::{
     Address, CompressedPublicKey, Network,
 };
 use bip39::Mnemonic;
+use zeroize::Zeroize;
 
 // NUMS point: BIP-341 standard provably-unspendable internal key.
 // Any address using this as the internal key can only be spent via script path.
@@ -19,6 +20,17 @@ pub struct FoundAddr {
     pub compressed_pubkey: String,   // always the 33-byte compressed key (02/03 prefix)
     pub wif:               String,
     pub mnemonic:          String,   // BIP-39 24-word mnemonic (English)
+}
+
+/// Wipe the secret-bearing fields when a result is dropped, so discarded
+/// results and abandoned searches don't leave keys in freed memory. This is
+/// best-effort: a String that reallocated while being built may have left
+/// copies behind, and the OS may have paged the buffer out already.
+impl Drop for FoundAddr {
+    fn drop(&mut self) {
+        self.wif.zeroize();
+        self.mnemonic.zeroize();
+    }
 }
 
 #[derive(Clone)]
@@ -39,14 +51,17 @@ pub struct InspectorResult {
 
 pub fn generate_address(secret: &SecretKey, addr_type: crate::types::AddrType, network: Network) -> String {
     use crate::types::AddrType;
-    let (xonly, _) = secret.x_only_public_key(SECP256K1);
-    let cpk = CompressedPublicKey(secret.public_key(SECP256K1));
+    // One scalar multiplication per attempt; the x-only key is a cheap
+    // projection of the full public key, not a second derivation.
+    let pk = secret.public_key(SECP256K1);
     match addr_type {
-        AddrType::Legacy       => Address::p2pkh(&cpk, network).to_string(),
-        AddrType::NestedSegWit => Address::p2shwpkh(&cpk, network).to_string(),
-        AddrType::NativeSegWit => Address::p2wpkh(&cpk, network).to_string(),
-        AddrType::Taproot      =>
-            Address::p2tr(SECP256K1, UntweakedPublicKey::from(xonly), None, network).to_string(),
+        AddrType::Legacy       => Address::p2pkh(&CompressedPublicKey(pk), network).to_string(),
+        AddrType::NestedSegWit => Address::p2shwpkh(&CompressedPublicKey(pk), network).to_string(),
+        AddrType::NativeSegWit => Address::p2wpkh(&CompressedPublicKey(pk), network).to_string(),
+        AddrType::Taproot      => {
+            let (xonly, _) = pk.x_only_public_key();
+            Address::p2tr(SECP256K1, UntweakedPublicKey::from(xonly), None, network).to_string()
+        }
     }
 }
 
@@ -55,7 +70,7 @@ pub fn generate_address_merkle(
     merkle: Option<bitcoin::taproot::TapNodeHash>,
     network: Network,
 ) -> String {
-    let (xonly, _) = secret.x_only_public_key(SECP256K1);
+    let (xonly, _) = secret.public_key(SECP256K1).x_only_public_key();
     Address::p2tr(SECP256K1, UntweakedPublicKey::from(xonly), merkle, network).to_string()
 }
 
@@ -67,25 +82,33 @@ pub fn build_found_addr(
     network: Network,
 ) -> FoundAddr {
     use crate::types::AddrType;
-    let (xonly, _) = secret.x_only_public_key(SECP256K1);
-    let cpk = CompressedPublicKey(secret.public_key(SECP256K1));
-    let compressed = cpk.to_string();
+    let pk = secret.public_key(SECP256K1);
+    let (xonly, _) = pk.x_only_public_key();
+    let compressed = CompressedPublicKey(pk).to_string();
     let pubkey = match addr_type {
         AddrType::Taproot => xonly.to_string(),
         _                 => compressed.clone(),
     };
-    let wif = bitcoin::PrivateKey::new(*secret, network).to_wif();
+    let mut privkey = bitcoin::PrivateKey::new(*secret, network);
+    let wif = privkey.to_wif();
+    privkey.inner.non_secure_erase();
     let mnemonic = secret_to_mnemonic(secret);
 
     FoundAddr { address, pubkey, compressed_pubkey: compressed, wif, mnemonic }
 }
 
 /// Convert a 32-byte secret key to a BIP-39 24-word English mnemonic.
+///
+/// The words encode the key itself as BIP-39 *entropy* — recovering the key
+/// means reversing the words back to entropy, not deriving an HD seed from
+/// them. See the README on restoring from the mnemonic.
 pub fn secret_to_mnemonic(secret: &SecretKey) -> String {
-    let bytes = secret.secret_bytes();
-    Mnemonic::from_entropy(&bytes)
+    let mut bytes = secret.secret_bytes();
+    let out = Mnemonic::from_entropy(&bytes)
         .map(|m| m.to_string())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    bytes.zeroize();
+    out
 }
 
 // ── Address inspection ────────────────────────────────────────────────────────
@@ -253,6 +276,25 @@ mod tests {
     fn secret_to_mnemonic_is_deterministic() {
         let s = test_secret();
         assert_eq!(secret_to_mnemonic(&s), secret_to_mnemonic(&s));
+    }
+
+    #[test]
+    fn mnemonic_reverses_to_the_private_key() {
+        // The documented recovery path: words -> BIP-39 entropy -> private key.
+        // (Not words -> seed -> BIP-32, which yields unrelated keys.)
+        let secret = test_secret();
+        let phrase = secret_to_mnemonic(&secret);
+        let parsed = bip39::Mnemonic::parse_in(bip39::Language::English, &phrase).unwrap();
+        let (entropy, len) = parsed.to_entropy_array();
+        assert_eq!(len, 32);
+        assert_eq!(&entropy[..32], &secret.secret_bytes()[..]);
+
+        // And that recovered key reproduces the same address.
+        let recovered = SecretKey::from_slice(&entropy[..32]).unwrap();
+        assert_eq!(
+            generate_address(&recovered, AddrType::Taproot, Network::Bitcoin),
+            generate_address(&secret,    AddrType::Taproot, Network::Bitcoin),
+        );
     }
 
     #[test]

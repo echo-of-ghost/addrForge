@@ -69,13 +69,13 @@ impl AddrType {
     pub fn description(&self) -> &'static str {
         match self {
             AddrType::Legacy =>
-                "P2PKH. BASE58CHECK (NO 0, O, I, L). MIXED CASE.\n  HASH160 OF COMPRESSED PUBKEY.\n  DERIVATION: m/44'/0'/0'",
+                "P2PKH. BASE58CHECK (NO 0, O, I, L). MIXED CASE.\n  HASH160 OF COMPRESSED PUBKEY.\n  KEYS ARE RAW (NOT HD-DERIVED) -- BACK UP THE WIF.",
             AddrType::NestedSegWit =>
-                "P2SH-P2WPKH. BASE58CHECK. MIXED CASE.\n  SEGWIT WRAPPED IN SCRIPT HASH.\n  DERIVATION: m/49'/0'/0'",
+                "P2SH-P2WPKH. BASE58CHECK. MIXED CASE.\n  SEGWIT WRAPPED IN SCRIPT HASH.\n  KEYS ARE RAW (NOT HD-DERIVED) -- BACK UP THE WIF.",
             AddrType::NativeSegWit =>
-                "P2WPKH. BECH32. LOWERCASE ONLY.\n  WITNESS V0. ERROR DETECTION BUILT IN.\n  DERIVATION: m/84'/0'/0'",
+                "P2WPKH. BECH32. LOWERCASE ONLY.\n  WITNESS V0. ERROR DETECTION BUILT IN.\n  KEYS ARE RAW (NOT HD-DERIVED) -- BACK UP THE WIF.",
             AddrType::Taproot =>
-                "P2TR. BECH32M. LOWERCASE ONLY.\n  WITNESS V1. SCHNORR SIGS. MUSIG2 SUPPORTED.\n  DERIVATION: m/86'/0'/0'",
+                "P2TR. BECH32M. LOWERCASE ONLY.\n  WITNESS V1. SCHNORR SIGS. MUSIG2 SUPPORTED.\n  KEYS ARE RAW (NOT HD-DERIVED) -- BACK UP THE WIF.",
         }
     }
 
