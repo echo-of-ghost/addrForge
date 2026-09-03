@@ -203,7 +203,9 @@ MATCH 1
   MNEMONIC     : word1 word2 word3 ... word24
 ```
 
-The mnemonic is the raw private key re-encoded as BIP-39 words. **It is not a wallet-restorable seed phrase.** BIP-39 wallets feed the words through PBKDF2 and BIP-32 HD derivation, which produces entirely different keys — importing the mnemonic into a wallet will *never* reproduce the vanity address, at any derivation path. Treat it only as a human-readable transcription of the key; the WIF is the backup that restores the address.
+The mnemonic is the raw private key re-encoded as BIP-39 words — a lossless, checksummed transcription of the same 32 bytes the WIF holds. It is useful for writing a key down by hand or stamping it into a metal backup plate, where 24 dictionary words are far less error-prone than a 52-character string.
+
+**It is not a wallet seed phrase.** Typing it into a wallet's "restore from seed" flow will not reproduce the vanity address — at any derivation path. Wallets run a seed phrase through PBKDF2 and BIP-32 HD derivation, which is a one-way transformation that yields entirely unrelated keys. See [Restoring from the mnemonic](#restoring-from-the-mnemonic) for the path that does work.
 
 ---
 
@@ -241,7 +243,19 @@ Run `getdescriptorinfo "tr(KwDiB...)"` first to get the checksum.
 
 Without a prefix, Electrum defaults to Legacy. Taproot WIF import is not supported by Electrum.
 
-**Do NOT import via the BIP-39 mnemonic.** Wallets derive keys from a mnemonic through PBKDF2 + BIP-32 — a one-way transformation of the words — so no wallet, at no derivation path, will ever produce the vanity address from it. If you fund the address and keep only the mnemonic as backup, the funds are unrecoverable through any standard wallet. Always back up and import the WIF.
+**Do NOT use a wallet's "restore from seed phrase" flow with the mnemonic.** That path runs the words through PBKDF2 + BIP-32 and will silently produce unrelated addresses. The mnemonic is recoverable, but only by extracting its *entropy* — see below.
+
+### Restoring from the mnemonic
+
+The 24 words encode the private key as BIP-39 **entropy**. Recovering it means reversing the words back to entropy, then importing that as a raw key:
+
+1. Reverse the words to entropy. Any BIP-39 tool that exposes a raw entropy field works — for example the [Ian Coleman BIP39 tool](https://github.com/iancoleman/bip39) run offline, where the **Entropy** field shows the hex once you paste the phrase. Do this on an air-gapped machine.
+2. That 64-hex-character entropy value *is* the private key.
+3. Import it as a raw private key (Bitcoin Core: `importdescriptors` with a `tr(<hex>)`-style descriptor; Sparrow: paste as a hex private key).
+
+Ignore any "BIP32 Root Key", derived-address table, or derivation path the tool shows — those belong to the HD-wallet interpretation of the words and have nothing to do with your address. Only the entropy field matters.
+
+Because this is easy to get wrong, **the WIF remains the recommended backup.**
 
 **Wallets that do NOT support Taproot WIF import:** BlueWallet, Trust Wallet, Exodus, and Wasabi (expects seed phrases only) generally cannot import raw Taproot keys even if they support Taproot addresses.
 

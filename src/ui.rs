@@ -589,7 +589,7 @@ pub fn draw_results(f: &mut Frame, body: Rect, app: &App) {
         detail.push(Line::from(vec![s("  WIF (PRIVATE KEY)  ", sb()), s("(KEEP SECRET — THIS RESTORES THE ADDRESS)", sw())]));
         detail.push(Line::from(vec![s("   ", sd()), s(m.wif.clone(), sg())]));
 
-        detail.push(Line::from(vec![s("  MNEMONIC (RAW KEY) ", sb()), s("(WALLET IMPORT WON'T MATCH — USE WIF)", sw())]));
+        detail.push(Line::from(vec![s("  MNEMONIC (RAW KEY) ", sb()), s("(NOT A SEED PHRASE — RESTORE VIA ENTROPY)", sw())]));
         // Split 24 words across two lines (12+12)
         let words: Vec<&str> = m.mnemonic.split_whitespace().collect();
         if words.len() == 24 {

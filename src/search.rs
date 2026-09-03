@@ -62,7 +62,7 @@ pub fn spawn_workers(
             let mut local_count: u64 = 0;
 
             while !done.load(Ordering::Relaxed) {
-                let secret = SecretKey::new(&mut rng);
+                let mut secret = SecretKey::new(&mut rng);
                 let addr_raw = if use_merkle {
                     generate_address_merkle(&secret, merkle_root, network)
                 } else {
@@ -84,6 +84,9 @@ pub fn spawn_workers(
                         }
                     }
                 }
+                // Wipe every candidate key, matched or not, rather than
+                // leaving millions of them in reused stack memory.
+                secret.non_secure_erase();
             }
             // Flush remaining local count
             attempts.fetch_add(local_count % ATTEMPT_BATCH, Ordering::Relaxed);

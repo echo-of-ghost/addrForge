@@ -5,6 +5,7 @@ use bitcoin::{
     Address, CompressedPublicKey, Network,
 };
 use bip39::Mnemonic;
+use zeroize::Zeroize;
 
 // NUMS point: BIP-341 standard provably-unspendable internal key.
 // Any address using this as the internal key can only be spent via script path.
@@ -19,6 +20,17 @@ pub struct FoundAddr {
     pub compressed_pubkey: String,   // always the 33-byte compressed key (02/03 prefix)
     pub wif:               String,
     pub mnemonic:          String,   // BIP-39 24-word mnemonic (English)
+}
+
+/// Wipe the secret-bearing fields when a result is dropped, so discarded
+/// results and abandoned searches don't leave keys in freed memory. This is
+/// best-effort: a String that reallocated while being built may have left
+/// copies behind, and the OS may have paged the buffer out already.
+impl Drop for FoundAddr {
+    fn drop(&mut self) {
+        self.wif.zeroize();
+        self.mnemonic.zeroize();
+    }
 }
 
 #[derive(Clone)]
@@ -77,18 +89,26 @@ pub fn build_found_addr(
         AddrType::Taproot => xonly.to_string(),
         _                 => compressed.clone(),
     };
-    let wif = bitcoin::PrivateKey::new(*secret, network).to_wif();
+    let mut privkey = bitcoin::PrivateKey::new(*secret, network);
+    let wif = privkey.to_wif();
+    privkey.inner.non_secure_erase();
     let mnemonic = secret_to_mnemonic(secret);
 
     FoundAddr { address, pubkey, compressed_pubkey: compressed, wif, mnemonic }
 }
 
 /// Convert a 32-byte secret key to a BIP-39 24-word English mnemonic.
+///
+/// The words encode the key itself as BIP-39 *entropy* — recovering the key
+/// means reversing the words back to entropy, not deriving an HD seed from
+/// them. See the README on restoring from the mnemonic.
 pub fn secret_to_mnemonic(secret: &SecretKey) -> String {
-    let bytes = secret.secret_bytes();
-    Mnemonic::from_entropy(&bytes)
+    let mut bytes = secret.secret_bytes();
+    let out = Mnemonic::from_entropy(&bytes)
         .map(|m| m.to_string())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    bytes.zeroize();
+    out
 }
 
 // ── Address inspection ────────────────────────────────────────────────────────
@@ -256,6 +276,25 @@ mod tests {
     fn secret_to_mnemonic_is_deterministic() {
         let s = test_secret();
         assert_eq!(secret_to_mnemonic(&s), secret_to_mnemonic(&s));
+    }
+
+    #[test]
+    fn mnemonic_reverses_to_the_private_key() {
+        // The documented recovery path: words -> BIP-39 entropy -> private key.
+        // (Not words -> seed -> BIP-32, which yields unrelated keys.)
+        let secret = test_secret();
+        let phrase = secret_to_mnemonic(&secret);
+        let parsed = bip39::Mnemonic::parse_in(bip39::Language::English, &phrase).unwrap();
+        let (entropy, len) = parsed.to_entropy_array();
+        assert_eq!(len, 32);
+        assert_eq!(&entropy[..32], &secret.secret_bytes()[..]);
+
+        // And that recovered key reproduces the same address.
+        let recovered = SecretKey::from_slice(&entropy[..32]).unwrap();
+        assert_eq!(
+            generate_address(&recovered, AddrType::Taproot, Network::Bitcoin),
+            generate_address(&secret,    AddrType::Taproot, Network::Bitcoin),
+        );
     }
 
     #[test]

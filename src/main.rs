@@ -27,6 +27,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use zeroize::Zeroize;
 
 use address::{generate_address, inspect_address, FoundAddr, InspectorResult};
 use difficulty::is_base58_prefix_reachable;
@@ -413,7 +414,7 @@ impl App {
         if !self.run_merkle.is_empty() {
             out.push_str(&format!("MERKLE  : {}\n\nWARNING: THESE ADDRESSES COMMIT TO THE SCRIPT TREE ABOVE. SPENDING VIA\nKEY PATH REQUIRES BOTH THE WIF AND THIS MERKLE ROOT; IMPORTING THE WIF\nALONE AS tr(KEY) YIELDS A DIFFERENT ADDRESS. KEEP YOUR SCRIPT TREE.\n", self.run_merkle));
         }
-        out.push_str("\nNOTE: THE MNEMONIC IS THE RAW PRIVATE KEY ENCODED AS BIP-39 WORDS.\nWALLETS DERIVE DIFFERENT KEYS FROM IT VIA BIP-32 -- IMPORTING IT WILL\nNOT RESTORE THESE ADDRESSES. ONLY THE WIF RESTORES AN ADDRESS.\n\n");
+        out.push_str("\nNOTE: THE MNEMONIC IS THE PRIVATE KEY ENCODED AS BIP-39 ENTROPY, NOT A\nWALLET SEED PHRASE. A \"RESTORE FROM SEED\" FLOW WILL PRODUCE UNRELATED\nADDRESSES. TO RECOVER FROM IT, REVERSE THE WORDS TO ENTROPY (64 HEX\nCHARS) AND IMPORT THAT AS A RAW KEY. THE WIF IS THE SIMPLER BACKUP.\n\n");
         for (i, m) in results.iter().enumerate() {
             let pk_label = if self.run_addr_type == AddrType::Taproot { "INTERNAL KEY" } else { "PUBKEY" };
             out.push_str(&format!("MATCH {}\n  {:<12} : {}\n  {:<12} : {}\n", i + 1, "ADDRESS", m.address, pk_label, m.pubkey));
@@ -422,7 +423,9 @@ impl App {
             }
             out.push_str(&format!("  {:<12} : {}\n  {:<12} : {}\n\n", "WIF KEY", m.wif, "MNEMONIC", m.mnemonic));
         }
-        match write_secret_file(&filepath, &out) {
+        let result = write_secret_file(&filepath, &out);
+        out.zeroize();
+        match result {
             Ok(_)  => self.saved = Some(filepath.to_string_lossy().into_owned()),
             Err(e) => self.error = Some(format!("SAVE FAILED: {}", e)),
         }
@@ -644,7 +647,7 @@ fn run_cli(cli: &Cli) -> Result<()> {
         println!("wif      : {}\nmnemonic : {}", m.wif, m.mnemonic);
     }
     if found > 0 {
-        eprintln!("note: the mnemonic encodes the raw key as BIP-39 words; wallet imports derive\ndifferent addresses from it. Only the WIF restores the address above.");
+        eprintln!("note: the mnemonic is the key encoded as BIP-39 entropy, not a wallet seed\nphrase — a \"restore from seed\" flow yields unrelated addresses. Recover it by\nreversing the words to entropy and importing that hex as a raw key.");
     }
 
     let elapsed = start.elapsed().as_secs_f64();
