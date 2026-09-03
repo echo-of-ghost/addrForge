@@ -171,6 +171,7 @@ pub struct App {
     pub run_count:     usize,
     pub run_threads:   usize,
     pub run_network:   Network,
+    pub run_merkle:    String,   // hex merkle root of the running search, empty if none
 
     // results
     pub selected: usize,
@@ -221,6 +222,7 @@ impl App {
             run_count:       0,
             run_threads:     0,
             run_network:     Network::Bitcoin,
+            run_merkle:      String::new(),
             selected:        0,
             saved:           None,
             inspector_input:  String::new(),
@@ -338,6 +340,7 @@ impl App {
                 Arc::new(move |addr: &str| addr.ends_with(&p))
             }
             Mode::Regex => {
+                validate_regex_case(&self.pattern_input, is_bech32)?;
                 let re = build_regex(&self.pattern_input)?;
                 Arc::new(move |addr: &str| re.is_match(addr))
             }
@@ -360,6 +363,7 @@ impl App {
         self.run_threads   = threads;
         self.run_addr_type = addr_type;
         self.run_network   = network;
+        self.run_merkle    = if merkle.is_some() { self.merkle_input.trim().to_uppercase() } else { String::new() };
         self.start         = Some(Instant::now());
         self.finish        = None;
         self.attempts      = attempts;
@@ -383,10 +387,13 @@ impl App {
         let mut out = format!("ADDRFORGE {} -- MUSIG2 DERIVATION\n\n", VERSION);
         out.push_str(&format!("NETWORK        : {}\nADDRESS        : {}\nAGG OUTPUT KEY : {}\nKEY COUNT      : {}\n\n",
             network_label(self.network), addr, agg, self.musig2_keys.len()));
-        for (i, k) in self.musig2_keys.iter().enumerate() {
+        out.push_str("KEYS WERE SORTED BEFORE AGGREGATION (BIP-327 KEYSORT). ALL SIGNERS\nMUST AGGREGATE IN THIS SORTED ORDER OR THE ADDRESS WILL NOT MATCH.\n\n");
+        let mut sorted_keys = self.musig2_keys.clone();
+        sorted_keys.sort();
+        for (i, k) in sorted_keys.iter().enumerate() {
             out.push_str(&format!("PUBKEY {:>2}       : {}\n", i + 1, k));
         }
-        match fs::write(&filepath, &out) {
+        match write_secret_file(&filepath, &out) {
             Ok(_)  => self.saved = Some(filepath.to_string_lossy().into_owned()),
             Err(e) => self.error = Some(format!("SAVE FAILED: {}", e)),
         }
@@ -399,18 +406,23 @@ impl App {
         let filename = format!("addrforge-{}.txt", ts);
         let filepath = std::path::Path::new(&self.output_dir).join(&filename);
         let mut out = format!("ADDRFORGE {} -- RESULTS\n", VERSION);
-        out.push_str(&format!("TYPE    : {}\nNETWORK : {}\nMODE    : {}\nPATTERN : {}\nTHREADS : {}  COUNT : {}\nELAPSED : {}  ATTEMPTS : {}\n\n",
+        out.push_str(&format!("TYPE    : {}\nNETWORK : {}\nMODE    : {}\nPATTERN : {}\nTHREADS : {}  COUNT : {}\nELAPSED : {}  ATTEMPTS : {}\n",
             self.run_addr_type.short(), network_label(self.run_network), self.run_mode.label(),
             self.run_pattern, self.run_threads, self.run_count,
             fmt_dur(self.elapsed()), fmt_num(self.attempts.load(Ordering::Relaxed))));
-        for (i, m) in results.iter().enumerate() {
-            out.push_str(&format!("MATCH {}\n  ADDRESS    : {}\n  PUBKEY     : {}\n", i + 1, m.address, m.pubkey));
-            if self.run_addr_type == AddrType::Taproot {
-                out.push_str(&format!("  COMPRESSED : {}\n", m.compressed_pubkey));
-            }
-            out.push_str(&format!("  WIF KEY    : {}\n  MNEMONIC   : {}\n\n", m.wif, m.mnemonic));
+        if !self.run_merkle.is_empty() {
+            out.push_str(&format!("MERKLE  : {}\n\nWARNING: THESE ADDRESSES COMMIT TO THE SCRIPT TREE ABOVE. SPENDING VIA\nKEY PATH REQUIRES BOTH THE WIF AND THIS MERKLE ROOT; IMPORTING THE WIF\nALONE AS tr(KEY) YIELDS A DIFFERENT ADDRESS. KEEP YOUR SCRIPT TREE.\n", self.run_merkle));
         }
-        match fs::write(&filepath, &out) {
+        out.push_str("\nNOTE: THE MNEMONIC IS THE RAW PRIVATE KEY ENCODED AS BIP-39 WORDS.\nWALLETS DERIVE DIFFERENT KEYS FROM IT VIA BIP-32 -- IMPORTING IT WILL\nNOT RESTORE THESE ADDRESSES. ONLY THE WIF RESTORES AN ADDRESS.\n\n");
+        for (i, m) in results.iter().enumerate() {
+            let pk_label = if self.run_addr_type == AddrType::Taproot { "INTERNAL KEY" } else { "PUBKEY" };
+            out.push_str(&format!("MATCH {}\n  {:<12} : {}\n  {:<12} : {}\n", i + 1, "ADDRESS", m.address, pk_label, m.pubkey));
+            if self.run_addr_type == AddrType::Taproot {
+                out.push_str(&format!("  {:<12} : {}\n", "COMPRESSED", m.compressed_pubkey));
+            }
+            out.push_str(&format!("  {:<12} : {}\n  {:<12} : {}\n\n", "WIF KEY", m.wif, "MNEMONIC", m.mnemonic));
+        }
+        match write_secret_file(&filepath, &out) {
             Ok(_)  => self.saved = Some(filepath.to_string_lossy().into_owned()),
             Err(e) => self.error = Some(format!("SAVE FAILED: {}", e)),
         }
@@ -455,23 +467,53 @@ impl App {
 // ── Validation / helpers ──────────────────────────────────────────────────────
 
 fn validate_prefix(s: &str, addr_type: AddrType, network: Network) -> Result<String> {
-    let fixed    = addr_type.fixed_prefix_len(network);
-    let expected = addr_type.default_prefix(network).to_lowercase();
-    if s.len() <= fixed { bail!("PREFIX TOO SHORT"); }
-    if !s.starts_with(&expected) { bail!("PREFIX MUST START WITH {}", expected.to_uppercase()); }
+    let fixed   = addr_type.fixed_prefix_len(network);
     let charset = addr_type.charset();
-    for ch in s[fixed..].chars() {
-        if !charset.contains(ch) {
-            bail!("INVALID CHAR '{}' FOR {} ADDRESSES", ch, addr_type.short());
-        }
-    }
+    if s.len() <= fixed { bail!("PREFIX TOO SHORT"); }
     if matches!(addr_type, AddrType::Legacy | AddrType::NestedSegWit) {
+        // Base58: the first character is part of the searchable pattern
+        // (testnet legacy addresses start with 'm' OR 'n'); the reachability
+        // check validates it against the version byte's numeric range.
+        for ch in s.chars() {
+            if !charset.contains(ch) {
+                bail!("INVALID CHAR '{}' FOR {} ADDRESSES", ch, addr_type.short());
+            }
+        }
         let version = addr_type.version_byte(network).unwrap_or(0x00);
         if !is_base58_prefix_reachable(s, version) {
             bail!("PREFIX '{}' IS UNREACHABLE FOR {} ADDRESSES", s, addr_type.short());
         }
+    } else {
+        let expected = addr_type.default_prefix(network).to_lowercase();
+        if !s.starts_with(&expected) { bail!("PREFIX MUST START WITH {}", expected.to_uppercase()); }
+        for ch in s[fixed..].chars() {
+            if !charset.contains(ch) {
+                bail!("INVALID CHAR '{}' FOR {} ADDRESSES", ch, addr_type.short());
+            }
+        }
     }
     Ok(s.to_string())
+}
+
+/// Bech32/bech32m addresses are lowercase-only: a bare uppercase letter in a
+/// regex (outside a character class, unescaped, without an `(?i)` flag) can
+/// never match, so the search would run forever.
+fn validate_regex_case(pattern: &str, is_bech32: bool) -> Result<()> {
+    if !is_bech32 || pattern.contains("(?i") { return Ok(()); }
+    let (mut escaped, mut in_class) = (false, false);
+    for ch in pattern.chars() {
+        if escaped { escaped = false; continue; }
+        match ch {
+            '\\' => escaped = true,
+            '[' => in_class = true,
+            ']' => in_class = false,
+            c if c.is_ascii_uppercase() && !in_class => {
+                bail!("UPPERCASE '{}' CAN NEVER MATCH — BECH32 ADDRESSES ARE LOWERCASE ONLY", c);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn validate_suffix_chars(s: &str, addr_type: AddrType) -> Result<String> {
@@ -498,6 +540,19 @@ fn parse_merkle(s: &str) -> Result<[u8; 32]> {
 
 fn num_cpus() -> usize {
     thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+}
+
+/// Write a file containing private key material with owner-only permissions.
+fn write_secret_file(path: &std::path::Path, contents: &str) -> io::Result<()> {
+    use std::io::Write;
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)?.write_all(contents.as_bytes())
 }
 
 pub fn fmt_dur(s: f64) -> String {
@@ -555,6 +610,8 @@ fn run_cli(cli: &Cli) -> Result<()> {
     let addr_type: AddrType = cli.addr_type.parse().map_err(|e: String| anyhow::anyhow!("{}", e))?;
     let network = parse_network(&cli.network)?;
     let threads = cli.threads.unwrap_or_else(num_cpus);
+    if threads == 0 || threads > 256 { bail!("--threads must be between 1 and 256"); }
+    if cli.count == 0 || cli.count > 1000 { bail!("--count must be between 1 and 1000"); }
     let pattern = cli.pattern.clone().ok_or_else(|| anyhow::anyhow!("--pattern is required in --no-tui mode"))?;
     let is_bech32 = matches!(addr_type, AddrType::Taproot | AddrType::NativeSegWit);
     let match_pat = if is_bech32 { pattern.to_lowercase() } else { pattern.clone() };
@@ -563,7 +620,7 @@ fn run_cli(cli: &Cli) -> Result<()> {
     let matcher: Matcher = match cli.mode.as_str() {
         "prefix" => { validate_prefix(&match_pat, addr_type, network)?; let p = match_pat.clone(); Arc::new(move |a: &str| a.starts_with(&p)) }
         "suffix" => { validate_suffix_chars(&match_pat, addr_type)?;    let p = match_pat.clone(); Arc::new(move |a: &str| a.ends_with(&p)) }
-        "regex"  => { let re = build_regex(&pattern)?; Arc::new(move |a: &str| re.is_match(a)) }
+        "regex"  => { validate_regex_case(&pattern, is_bech32)?; let re = build_regex(&pattern)?; Arc::new(move |a: &str| re.is_match(a)) }
         _        => bail!("Unknown mode: {}. Use prefix, suffix, or regex.", cli.mode),
     };
 
@@ -581,9 +638,13 @@ fn run_cli(cli: &Cli) -> Result<()> {
     let mut found = 0;
     for m in rx {
         found += 1;
-        println!("--- match {} ---\naddress  : {}\npubkey   : {}", found, m.address, m.pubkey);
+        let pk_label = if addr_type == AddrType::Taproot { "internal key (x-only, untweaked)" } else { "pubkey" };
+        println!("--- match {} ---\naddress  : {}\n{} : {}", found, m.address, pk_label, m.pubkey);
         if m.pubkey != m.compressed_pubkey { println!("compressed: {}", m.compressed_pubkey); }
         println!("wif      : {}\nmnemonic : {}", m.wif, m.mnemonic);
+    }
+    if found > 0 {
+        eprintln!("note: the mnemonic encodes the raw key as BIP-39 words; wallet imports derive\ndifferent addresses from it. Only the WIF restores the address above.");
     }
 
     let elapsed = start.elapsed().as_secs_f64();
@@ -597,6 +658,7 @@ fn run_bench(cli: &Cli) -> Result<()> {
     let addr_type: AddrType = cli.addr_type.parse().map_err(|e: String| anyhow::anyhow!("{}", e))?;
     let network  = parse_network(&cli.network)?;
     let threads  = cli.threads.unwrap_or_else(num_cpus);
+    if threads == 0 || threads > 256 { bail!("--threads must be between 1 and 256"); }
     const BATCH: u64 = 4096;
 
     eprintln!("Benchmarking {} {} generation on {} threads for 5s...",
@@ -657,8 +719,22 @@ fn main() -> Result<()> {
     if let Ok(n) = parse_network(&cli.network) { app.network = n; }
     app.apply_config(&cfg);
 
+    // Run the event loop, then always restore the terminal — even on error —
+    // so a failed draw doesn't leave the shell in raw mode.
+    let result = run_tui(&mut term, &mut app);
+
+    app.done.store(true, Ordering::Relaxed);
+
+    // Persist settings on exit
+    let _ = config::save(&app.to_config());
+
+    let restored = restore_terminal(&mut term);
+    result.and(restored)
+}
+
+fn run_tui(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     loop {
-        term.draw(|f| ui::draw(f, &app))?;
+        term.draw(|f| ui::draw(f, app))?;
 
         if event::poll(Duration::from_millis(TICK_MS))? {
             match event::read()? {
@@ -695,7 +771,7 @@ fn main() -> Result<()> {
                                 let session    = std::mem::replace(&mut app.session, Session::new());
                                 let output_dir = app.output_dir.clone();
                                 let network    = app.network;
-                                app = App::new_with_config(output_dir, session, network);
+                                *app = App::new_with_config(output_dir, session, network);
                             }
                             Screen::Results => {
                                 app.screen = Screen::Setup;
@@ -708,14 +784,14 @@ fn main() -> Result<()> {
                     }
 
                     match app.screen {
-                        Screen::ModePicker   => on_mode_picker_key(&mut app, k.code),
-                        Screen::TypePicker   => on_picker_key(&mut app, k.code),
-                        Screen::MuSig2Setup  => on_musig2_setup_key(&mut app, k.code),
-                        Screen::MuSig2Result => on_musig2_result_key(&mut app, k.code),
-                        Screen::Setup        => on_setup_key(&mut app, k.code),
+                        Screen::ModePicker   => on_mode_picker_key(app, k.code),
+                        Screen::TypePicker   => on_picker_key(app, k.code),
+                        Screen::MuSig2Setup  => on_musig2_setup_key(app, k.code),
+                        Screen::MuSig2Result => on_musig2_result_key(app, k.code),
+                        Screen::Setup        => on_setup_key(app, k.code),
                         Screen::Running      => {}
-                        Screen::Results      => on_results_key(&mut app, k.code),
-                        Screen::Inspector    => on_inspector_key(&mut app, k.code),
+                        Screen::Results      => on_results_key(app, k.code),
+                        Screen::Inspector    => on_inspector_key(app, k.code),
                     }
                 }
                 _ => {}
@@ -725,12 +801,6 @@ fn main() -> Result<()> {
         app.tick();
     }
 
-    app.done.store(true, Ordering::Relaxed);
-
-    // Persist settings on clean exit
-    let _ = config::save(&app.to_config());
-
-    restore_terminal(&mut term)?;
     Ok(())
 }
 
@@ -848,7 +918,10 @@ fn on_setup_key(app: &mut App, key: KeyCode) {
         KeyCode::Backspace => {
             match app.field {
                 Field::Pattern => {
-                    let min = if app.mode == Mode::Prefix { app.addr_type.fixed_prefix_len(app.network) } else { 0 };
+                    // Base58 first chars are editable (testnet legacy: 'm' or 'n');
+                    // bech32 keeps its fixed hrp+version prefix.
+                    let is_base58 = matches!(app.addr_type, AddrType::Legacy | AddrType::NestedSegWit);
+                    let min = if app.mode == Mode::Prefix && !is_base58 { app.addr_type.fixed_prefix_len(app.network) } else { 0 };
                     if app.pattern_input.len() > min { app.pattern_input.pop(); }
                 }
                 Field::Threads => { app.threads_input.pop(); }
@@ -869,7 +942,7 @@ fn on_setup_key(app: &mut App, key: KeyCode) {
 
                     match app.mode {
                         Mode::Prefix => {
-                            if app.pattern_input.len() < fixed {
+                            if !is_base58 && app.pattern_input.len() < fixed {
                                 app.pattern_input.push(normalise(c));
                             } else if app.pattern_input.len() >= fixed + 12 {
                                 app.input_warn = Some("MAX LENGTH REACHED".into());
@@ -954,5 +1027,50 @@ fn on_inspector_key(app: &mut App, key: KeyCode) {
             }
         }
         _ => {}
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn secret_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("addrforge-permtest-{}.txt", std::process::id()));
+        let _ = fs::remove_file(&path);
+        write_secret_file(&path, "secret").unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let _ = fs::remove_file(&path);
+        assert_eq!(mode, 0o600, "secret files must be owner-only, got {:o}", mode);
+    }
+
+    #[test]
+    fn regex_case_validation() {
+        assert!(validate_regex_case("bc1pDAD", true).is_err());
+        assert!(validate_regex_case("bc1pdad", true).is_ok());
+        assert!(validate_regex_case("(?i)DAD", true).is_ok());
+        assert!(validate_regex_case("[^A-Z]dad", true).is_ok());
+        assert!(validate_regex_case(r"\D+", true).is_ok());
+        assert!(validate_regex_case("1ABC", false).is_ok());
+    }
+
+    #[test]
+    fn validate_prefix_accepts_testnet_n() {
+        // Testnet legacy second chars: 'm' addresses use 'f'..'z', 'n' addresses '1'..'4'
+        assert!(validate_prefix("n4", AddrType::Legacy, Network::Testnet).is_ok());
+        assert!(validate_prefix("mw", AddrType::Legacy, Network::Testnet).is_ok());
+        assert!(validate_prefix("m4", AddrType::Legacy, Network::Testnet).is_err());
+        assert!(validate_prefix("p4", AddrType::Legacy, Network::Testnet).is_err());
+    }
+
+    #[test]
+    fn validate_prefix_accepts_repeated_ones() {
+        assert!(validate_prefix("111", AddrType::Legacy, Network::Bitcoin).is_ok());
+        assert!(validate_prefix("4A", AddrType::Legacy, Network::Bitcoin).is_err());
     }
 }

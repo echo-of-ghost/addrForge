@@ -290,6 +290,8 @@ fn draw_musig2_result(f: &mut Frame, body: Rect, app: &App) {
             s(format!("  /  AGGREGATE ADDRESS DERIVED ({} KEYS)", app.musig2_keys.len()), sd()),
         ]),
         Line::from(s("  ALL PARTIES MUST CO-SIGN. INDISTINGUISHABLE FROM SINGLESIG ON-CHAIN.", sd())),
+        Line::from(s("  ! KEYS SORTED BEFORE AGGREGATION (BIP-327 KEYSORT) — ALL SIGNERS MUST", sw())),
+        Line::from(s("  ! AGGREGATE IN SORTED ORDER OR THE ADDRESS WILL NOT MATCH.", sw())),
         Line::from(sep_line()),
         blank(),
         Line::from(s("  TAPROOT ADDRESS", sb())),
@@ -300,7 +302,9 @@ fn draw_musig2_result(f: &mut Frame, body: Rect, app: &App) {
         blank(),
     ];
 
-    for (i, k) in app.musig2_keys.iter().enumerate().take(8) {
+    let mut sorted_keys = app.musig2_keys.clone();
+    sorted_keys.sort();
+    for (i, k) in sorted_keys.iter().enumerate().take(8) {
         lines.push(Line::from(vec![
             s(format!("  PUBKEY {:>2} : ", i + 1), sd()),
             s(truncate(k, 58).to_string(), sg()),
@@ -421,7 +425,7 @@ fn draw_setup(f: &mut Frame, body: Rect, app: &App) {
             if matches!(app.addr_type, AddrType::Legacy) && app.pattern_input.len() > 1 {
                 let version = app.addr_type.version_byte(app.network).unwrap_or(0x00);
                 if base58_prefix_is_rare(&app.pattern_input, version) {
-                    lines.push(Line::from(s("  ! ONLY ~4% OF LEGACY ADDRESSES CAN MATCH — EXPECT SLOWER RESULTS", sw())));
+                    lines.push(Line::from(s("  ! THIS PREFIX MATCHES ONLY A RARE ADDRESS FORM — EXPECT SLOWER RESULTS", sw())));
                 }
             }
         }
@@ -564,8 +568,13 @@ pub fn draw_results(f: &mut Frame, body: Rect, app: &App) {
         detail.push(Line::from(vec![s("   ", sd()), s(m.address.clone(), sg())]));
         detail.push(blank());
 
+        if !app.run_merkle.is_empty() {
+            detail.push(Line::from(s("  ! SCRIPT-COMMITTED (MERKLE ROOT SET) — KEEP YOUR SCRIPT TREE", sw())));
+            detail.push(blank());
+        }
+
         let pk_label = match app.run_addr_type {
-            AddrType::Taproot => "  OUTPUT KEY (TWEAKED X-ONLY PUBKEY)",
+            AddrType::Taproot => "  INTERNAL KEY (X-ONLY, UNTWEAKED)",
             _                 => "  COMPRESSED PUBLIC KEY",
         };
         detail.push(Line::from(s(pk_label, sb())));
@@ -577,10 +586,10 @@ pub fn draw_results(f: &mut Frame, body: Rect, app: &App) {
         }
 
         detail.push(blank());
-        detail.push(Line::from(vec![s("  WIF (PRIVATE KEY)  ", sb()), s("(KEEP SECRET)", sw())]));
+        detail.push(Line::from(vec![s("  WIF (PRIVATE KEY)  ", sb()), s("(KEEP SECRET — THIS RESTORES THE ADDRESS)", sw())]));
         detail.push(Line::from(vec![s("   ", sd()), s(m.wif.clone(), sg())]));
 
-        detail.push(Line::from(vec![s("  BIP-39 MNEMONIC    ", sb()), s("(KEEP SECRET)", sw())]));
+        detail.push(Line::from(vec![s("  MNEMONIC (RAW KEY) ", sb()), s("(WALLET IMPORT WON'T MATCH — USE WIF)", sw())]));
         // Split 24 words across two lines (12+12)
         let words: Vec<&str> = m.mnemonic.split_whitespace().collect();
         if words.len() == 24 {
