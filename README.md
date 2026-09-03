@@ -58,12 +58,14 @@ Settings (address type, network, mode, thread count) are saved to `~/.config/add
 
 ## Address types
 
-| Type                      | Mainnet prefix | Format  | Derivation  |
-| ------------------------- | -------------- | ------- | ----------- |
-| Taproot P2TR              | `bc1p`         | bech32m | m/86'/0'/0' |
-| Native SegWit P2WPKH      | `bc1q`         | bech32  | m/84'/0'/0' |
-| Nested SegWit P2SH-P2WPKH | `3`            | base58  | m/49'/0'/0' |
-| Legacy P2PKH              | `1`            | base58  | m/44'/0'/0' |
+| Type                      | Mainnet prefix | Format  |
+| ------------------------- | -------------- | ------- |
+| Taproot P2TR              | `bc1p`         | bech32m |
+| Native SegWit P2WPKH      | `bc1q`         | bech32  |
+| Nested SegWit P2SH-P2WPKH | `3`            | base58  |
+| Legacy P2PKH              | `1`            | base58  |
+
+Keys are generated as raw random keys, not derived from an HD seed — the WIF in the result file is the backup.
 
 Bech32 addresses (Taproot, Native SegWit) are lowercase only. Base58 addresses (Legacy, Nested) are case-sensitive — `1ABC` and `1abc` are different patterns.
 
@@ -117,11 +119,13 @@ Use `--bench` to measure your machine's generation rate before committing to a l
 
 MuSig2 mode derives an n-of-n aggregate Taproot address from 2 to 16 compressed public keys (BIP-327). All parties must co-sign to spend. The resulting address is indistinguishable from a single-key Taproot address on-chain.
 
+Keys are sorted lexicographically before aggregation (the BIP-327 *KeySort* convention), so entry order doesn't matter here — but BIP-327 aggregation is order-sensitive, and all co-signers must aggregate in the same sorted order when signing, or they will compute a different aggregate key and be unable to spend from this address. The saved result file lists the keys in the sorted order used.
+
 **Input format:** 33-byte compressed public keys, 66 hex characters, with `02` or `03` prefix.
 
 In the TUI, add keys one at a time — type 66 hex chars and press `Enter` to confirm each key. Once two or more keys are added, press `Enter` on an empty input to derive the aggregate address. `Backspace` on an empty input removes the last confirmed key.
 
-**Important:** The key shown on the singlesig results screen labeled _OUTPUT KEY (TWEAKED X-ONLY PUBKEY)_ is **not** the right format for MuSig2. Use the _COMPRESSED PUBKEY_ row shown below it, or provide keys generated externally by your wallet software.
+**Important:** The key shown on the singlesig results screen labeled _INTERNAL KEY (X-ONLY, UNTWEAKED)_ is **not** the right format for MuSig2. Use the _COMPRESSED PUBKEY_ row shown below it, or provide keys generated externally by your wallet software.
 
 **This is not a signing tool.** addrforge derives the address only. To actually spend from a MuSig2 address you need a BIP-327 compatible signing library or wallet.
 
@@ -192,14 +196,14 @@ THREADS : 8  COUNT : 1
 ELAPSED : 4.2S  ATTEMPTS : 3,847,201
 
 MATCH 1
-  ADDRESS    : bc1pface8qx3...
-  PUBKEY     : <x-only output key>
-  COMPRESSED : 02<compressed pubkey — use this for MuSig2>
-  WIF KEY    : <private key in WIF format>
-  MNEMONIC   : word1 word2 word3 ... word24
+  ADDRESS      : bc1pface8qx3...
+  INTERNAL KEY : <x-only internal key (untweaked)>
+  COMPRESSED   : 02<compressed pubkey — use this for MuSig2>
+  WIF KEY      : <private key in WIF format>
+  MNEMONIC     : word1 word2 word3 ... word24
 ```
 
-The mnemonic is a standard BIP-39 24-word seed phrase derived directly from the private key entropy. It encodes the same key as the WIF and can be used to import into any BIP-39 compatible wallet.
+The mnemonic is the raw private key re-encoded as BIP-39 words. **It is not a wallet-restorable seed phrase.** BIP-39 wallets feed the words through PBKDF2 and BIP-32 HD derivation, which produces entirely different keys — importing the mnemonic into a wallet will *never* reproduce the vanity address, at any derivation path. Treat it only as a human-readable transcription of the key; the WIF is the backup that restores the address.
 
 ---
 
@@ -237,7 +241,7 @@ Run `getdescriptorinfo "tr(KwDiB...)"` first to get the checksum.
 
 Without a prefix, Electrum defaults to Legacy. Taproot WIF import is not supported by Electrum.
 
-**Via BIP-39 mnemonic** — import the 24-word phrase into any BIP-39 compatible wallet (Sparrow, Ledger, Trezor, etc.). Note that BIP-39 wallets derive keys via a full HD path — the address you get will only match the addrforge result if the wallet derives at the correct path (m/86'/0'/0'/0/0 for Taproot).
+**Do NOT import via the BIP-39 mnemonic.** Wallets derive keys from a mnemonic through PBKDF2 + BIP-32 — a one-way transformation of the words — so no wallet, at no derivation path, will ever produce the vanity address from it. If you fund the address and keep only the mnemonic as backup, the funds are unrecoverable through any standard wallet. Always back up and import the WIF.
 
 **Wallets that do NOT support Taproot WIF import:** BlueWallet, Trust Wallet, Exodus, and Wasabi (expects seed phrases only) generally cannot import raw Taproot keys even if they support Taproot addresses.
 
@@ -260,6 +264,8 @@ Without a prefix, Electrum defaults to Legacy. Taproot WIF import is not support
 ## Taproot Merkle root
 
 In the TUI setup screen, Taproot prefix and suffix searches expose an optional **MERKLE** field. If you provide a 32-byte (64 hex char) Taproot script tree root, the address will commit to that script tree. Leave blank for a standard key-path-only address.
+
+The merkle root is written into the saved result file. **Keep it together with the WIF**: a script-committed address cannot be reconstructed (or key-path spent) from the WIF alone — importing the WIF as `tr(KEY)` yields a *different* address. You need the WIF plus the exact merkle root (and, for script-path spending, the script tree itself).
 
 ---
 
